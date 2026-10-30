@@ -1,5 +1,7 @@
 # Tessera
 
+https://github.com/user-attachments/assets/f27ced3c-fc75-4c98-8823-88c82a61410a
+
 Production video upscaling for ComfyUI, built on MiniMax H3. Load a
 clip, set a scale factor, press run: Tessera refines it tile-by-tile
 and chunk-by-chunk into clean 2K/4K/8K — on a single consumer GPU, at
