@@ -187,7 +187,7 @@ two pieces:
    preamble) when available. Spot-anchor law (183/186/189, 4x and 2x):
    only frame 0 relays detail forward on its own; a mid-clip 1-frame
    splice is a +-2 frame blip -- VAE packing averages it away and
-   mid-guide detail does not propagate. `spread` is what gives mid/last anchors their reach (validated synthetically: warped-detail corr 0.63 at +-7 frames through motion). r73: the spread weight is a PURE linear taper from the anchor frame -- the r68 full-strength plateau over the packing group ended in a hard cliff (measured: adjacent-corr 0.96 0.95 0.25 0.99 at an 8K head, the frame-2->3 pop; at spread 24 the same flaw read as a ~1s ease-in ghost of flow-warped anchor texture). The plateau rationale never applied at frame 0 (head token = 1 px frame); it is shelved for mid-clip anchors. Default spread is 4 (frame-0 anchors need no reach -- the model relays head detail natively, per the 183 curve). SPLICE-SCALE LAW (r73, runs 215/217/218): the pixel splice is a 2x TOOL. The anchor's texture and the model's generated texture are two different renderings; any time-varying splice weight is a visible crossfade between them (cliff = pop, taper = morph, long spread = drift ghost -- all measured). At 2x the textures agree and the splice relays real detail; at 4x+ leave the anchor input UNPLUGGED: the no-splice control (218) showed a perfectly smooth head (adj corr 1.00 from f1) at the same head detail as the anchored run's steady state -- the Qwen still's value at big hops flows through the ReferenceToVideo attention ref instead. Anchor-grade texture at 4x+ is the phase-2 problem (model-rendered, not spliced). RELAY-RELEASE LAW (runs 219/220/221, 1x A/B/C): the anchor relay IS the model re-rendering the anchor texture in its released tail steps -- with motion_adapt clamping release to 0.00 the relay cannot run and the splice degrades to a visible crossfade (head adj-corr 0.90 default vs 0.96-0.97 with release freedom; the same mechanism measured 0.67 at 4x). House setting WHEN ANCHORING: motion_release_floor 0.3 (keeps motion_adapt armed, guarantees the relay its freedom; also lifts steady detail 34.9 -> 35.2). Floor 0.0 remains correct for unanchored fast-motion work; floor 0.3 on fast clips is unpriced (swimming risk) -- A/B pending, as is the 4x confirmation. FLAT-TILE LAW (r74, coin-on-grey stress plate): a tile whose plate crop has no fine-band energy gives the model zero evidence and total freedom -- the ref2va checkpoint painted the reference FACE into every empty tile once release opened (floor 0.3), and per-tile text re-encode makes it worse (blank crop + global prompt). `flat_skip` in Extra Options (r75 semantics) skips featureless windows: they keep the plate (featureless content is already perfectly rendered; a skipped window cannot hallucinate) and sampling time drops with them. Four design rules, each bought with a measured failure: the evidence is PIXEL-SPACE, not latent (two latent metrics were falsified in a row -- the 1-cell Laplacian, r75, and a fine+mid two-band read, r76, both sit on a broadband VAE carrier that compresses real content to 1.7-6.5x of floor: a greenscreen plate's SOFT FACES scored below boat-wood edges and were skipped, runs 238/239, while the SAME tiles separated 9-188x in pixel space; Tessera Streamed Encode measures fine-band energy per block per frame on the SOURCE pixels -- the only sharp image in the graph (the 4x-upscaled plate has no top-octave energy by construction: soft faces read 2.7x floor on the plate vs 38-43x for hard frame borders, run 240 -- one octave less blind than the latent, same disease); one block maps to ~128px on the target and rides the stats to the refine through the conditioning -- without them flat_skip prints a note and stays OFF rather than guessing blind, and a frame-count mismatch, i.e. a re-timing node between encode and refine, also disables it); the score is the BLOCK-MAX, not the tile mean (the r74 mean averaged a coin-top sliver into "flat" and cut a 24/255 band straight across the coin, run 236 -- the max refuses to skip any tile the subject ever touches); the threshold is a RATIO to the clip's own block-energy floor (median block), so it self-calibrates across source grain/compression with no calibration run -- flat noise can only peak at ~2-3x its own median (coin plate 2.7-2.8x) while content clears by multiples (soft faces 9x+, coin sliver 15x, ground dust 41x, hero 502x, all pixel-measured), default 4.0, 0 = off; and the decision is PER (TILE, CHUNK) -- the model only sees its own window, so a tile the subject exits before a later chunk is EMPTY in that window (the exact 234 hallucination setup) and skips there while refining where the subject is, the handoff invisible by construction because it only occurs across content flat on both sides (refined-flat == plate-flat: grain 0.0011 vs 0.0012, seam ratios ~1, run 236). Heroes never skip; values below 1.0 (stale absolute-era widgets) trigger a loud warning. Also r74: the dilation budget's cap shrink is clamped by CLIP LENGTH (tokens = tile area x min(window, clip); a 90-frame clip under x1.61 dilation now keeps the full 1024 cap instead of dropping to 768), and the anchor false-lock limit scales with resolution (8px per 1088 rows).
+   mid-guide detail does not propagate. `spread` is what gives mid/last anchors their reach (validated synthetically: warped-detail corr 0.63 at +-7 frames through motion). r73: the spread weight is a PURE linear taper from the anchor frame -- the r68 full-strength plateau over the packing group ended in a hard cliff (measured: adjacent-corr 0.96 0.95 0.25 0.99 at an 8K head, the frame-2->3 pop; at spread 24 the same flaw read as a ~1s ease-in ghost of flow-warped anchor texture). The plateau rationale never applied at frame 0 (head token = 1 px frame); it is shelved for mid-clip anchors. Default spread is 4 (frame-0 anchors need no reach -- the model relays head detail natively, per the 183 curve). SPLICE-SCALE LAW (r73, runs 215/217/218): the pixel splice is a 2x TOOL. The anchor's texture and the model's generated texture are two different renderings; any time-varying splice weight is a visible crossfade between them (cliff = pop, taper = morph, long spread = drift ghost -- all measured). At 2x the textures agree and the splice relays real detail; at 4x+ leave the anchor input UNPLUGGED: the no-splice control (218) showed a perfectly smooth head (adj corr 1.00 from f1) at the same head detail as the anchored run's steady state -- the Qwen still's value at big hops flows through the ReferenceToVideo attention ref instead. Anchor-grade texture at 4x+ is the phase-2 problem (model-rendered, not spliced). RELAY-RELEASE LAW (runs 219/220/221, 1x A/B/C): the anchor relay IS the model re-rendering the anchor texture in its released tail steps -- with motion_adapt clamping release to 0.00 the relay cannot run and the splice degrades to a visible crossfade (head adj-corr 0.90 default vs 0.96-0.97 with release freedom; the same mechanism measured 0.67 at 4x). House setting WHEN ANCHORING: motion_release_floor 0.3 (keeps motion_adapt armed, guarantees the relay its freedom; also lifts steady detail 34.9 -> 35.2). Floor 0.0 remains correct for unanchored fast-motion work; floor 0.3 on fast clips is unpriced (swimming risk) -- A/B pending, as is the 4x confirmation. FLAT-TILE LAW (r74, coin-on-grey stress plate): a tile whose plate crop has no fine-band energy gives the model zero evidence and total freedom -- the ref2va checkpoint painted the reference FACE into every empty tile once release opened (floor 0.3), and per-tile text re-encode makes it worse (blank crop + global prompt). `flat_skip` in Extra Options (r75 semantics) skips featureless windows: they keep the plate (featureless content is already perfectly rendered; a skipped window cannot hallucinate) and sampling time drops with them. Four design rules, each bought with a measured failure: the evidence is PIXEL-SPACE, not latent (two latent metrics were falsified in a row -- the 1-cell Laplacian, r75, and a fine+mid two-band read, r76, both sit on a broadband VAE carrier that compresses real content to 1.7-6.5x of floor: a greenscreen plate's SOFT FACES scored below boat-wood edges and were skipped, runs 238/239, while the SAME tiles separated 9-188x in pixel space; Tessera Streamed Encode measures fine-band energy per block per frame on the SOURCE pixels -- the only sharp image in the graph (the 4x-upscaled plate has no top-octave energy by construction: soft faces read 2.7x floor on the plate vs 38-43x for hard frame borders, run 240 -- one octave less blind than the latent, same disease); one block maps to ~128px on the target and rides the stats to the refine through the conditioning -- without them flat_skip prints a note and stays OFF rather than guessing blind, and a frame-count mismatch, i.e. a re-timing node between encode and refine, also disables it); the score is the BLOCK-MAX, not the tile mean (the r74 mean averaged a coin-top sliver into "flat" and cut a 24/255 band straight across the coin, run 236 -- the max refuses to skip any tile the subject ever touches); the threshold is a RATIO to the clip's own block-energy floor (median block, CAPPED at an absolute 1e-3 since r79: on a busy-everywhere plate the median is content, not noise -- a parade clip measured 8.4e-3 against 3.8e-5 coin and 2.9e-4 greenscreen, and a quadrant of brick, awnings and bunting was skipped at ratio 3.8; capped, it reads 32x and refines, while a grainy-but-flat clip simply refines, the safe direction), so it self-calibrates across source grain/compression with no calibration run -- flat noise can only peak at ~2-3x its own median (coin plate 2.7-2.8x) while content clears by multiples (soft faces 9x+, coin sliver 15x, ground dust 41x, hero 502x, all pixel-measured), default 4.0, 0 = off; and the decision is PER (TILE, CHUNK) -- the model only sees its own window, so a tile the subject exits before a later chunk is EMPTY in that window (the exact 234 hallucination setup) and skips there while refining where the subject is, the handoff invisible by construction because it only occurs across content flat on both sides (refined-flat == plate-flat: grain 0.0011 vs 0.0012, seam ratios ~1, run 236). Heroes never skip; values below 1.0 (stale absolute-era widgets) trigger a loud warning. Also r74: the dilation budget's cap shrink is clamped by CLIP LENGTH (tokens = tile area x min(window, clip); a 90-frame clip under x1.61 dilation now keeps the full 1024 cap instead of dropping to 768), and the anchor false-lock limit scales with resolution (8px per 1088 rows).
 2. **`guide_inherit`** on Tessera Refine: each later temporal chunk's
    guide frames before its generated range are replaced by the
    already-refined latent canvas -- rendered detail becomes the next
@@ -276,3 +276,68 @@ experiment: a detail LoRA on the last step through `model_fine`.
 ## Install
 
 Clone into `ComfyUI/custom_nodes/` and restart.
+
+## Speed work (r78+) — measure first
+
+The complaint after release was render time, so r78 added a timing
+breakdown line at the end of every refine run (`[TesseraRefine] timing:
+total = prep + text-encode + sampling (pure steps, model load/swap) +
+tile overhead + output`). The load/swap estimate is per sampler call:
+the first step carries the model load, so first-step latency minus the
+median pure step isolates it. Baseline, 544p->1080p parade clip, 124
+frames unchunked, 4 tiles of 1024x640, r79: **7m04s = pure steps 4m33s
+(64%) + model load/swap 51s (12%) + tile overhead 46s (11%) +
+text-encode 29s (7%) + output 25s (6%)**. The 64% is the model doing
+its work on ~95k tokens per window and moves only if what the model
+computes changes; the rest is engineering.
+
+**r80, phase-batched sampling.** The tail split swapped main -> fine ->
+main around every tile (8 swaps for 4 tiles, ~6s each, linear in tile
+count). Within a chunk the tiles are independent in overlap mode (each
+window anchored to its own conditioning; the canvas is written only
+when the chunk's last tile lands), so the job loop now runs every
+tile's head call with the main model loaded once, parks the
+intermediates, then every tail call with the fine model loaded once:
+two swaps per chunk. Same math, same seeds, same outputs; composite
+order within a chunk is unchanged; chunk chaining (guide_inherit) is
+untouched because the reorder lives inside a chunk. Hard-paste mode
+(seam_regen 0) keeps the sequential order. Next: the diagnostic plate
+decode in the tile-overhead bucket, then a window-length A/B on the
+same clip.
+
+**r81, encode warm-ups removed.** Reading comfy's current H3 VAE
+(`comfy/ldm/minimax/vae.py`): `encode_temporal` encodes a clip as
+INDEPENDENT 17-frame clips -- each through `_adaptive_encode` alone,
+tokens concatenated, the last 3 dropped -- causal only inside a clip.
+The r70 streamed encode was built against an earlier, clip-wide causal
+encoder; its 22-px warm-up per interior window (re-encode head + one
+block, discard) is redundant under the rewrite: block g encodes
+identically in any window. Windows are now disjoint on the block grid,
+stride m, each carrying the 5-frame ladder tail (17n+5; without it the
+token_drop eats the last block's final 3 tokens); the tail's 2 tokens
+are the next block's first two, exact by in-clip causality, and the
+next window re-derives only those. Stub-verified against a faithful
+model of the stock encode (per-clip, front pre-pad, causal, repeat-pad,
+token_drop) for 45 (clip length, segment) combinations: stitch ==
+monolithic everywhere. Encode work: 168 -> 134 frames on the 1080p
+baseline, ~833 -> 672 (18 -> 12 windows) on the 15s 4K case.
+`TESSERA_VERIFY_ENCODE=1` also runs the stock whole-clip encode and
+prints max|delta| against the stitch -- the live confirmation. The
+same reading says the stock decoder (`decode_temporal`, chunked with
+an `output_buffer`) already streams; our segment decoder's warm-ups
+duplicate it, and the fp16/disk-backed buffer is the real value-add
+there -- next candidate.
+
+**r82-r84, compositing A/B -> `composite` switch.** The unchunked path's
+pixel compositor (per-tile decodes, pixel crossfade) was never measured
+against the latent compositing every chunked run uses. Measured on the
+1080p parade clip, same seed, correct LoRA, with the decoder path
+equalized (r83: a frame_map no longer forces the segment decoder onto
+small canvases): latent = 0.991x fine-band energy (uniform across
+quadrants, not seam-localized), seams equal (1.58 vs 1.59 vertical),
+temporal stability 0.625 vs 0.614 (+1.7%), time 499s vs 538s; at 4K
+the per-tile decodes it removes are ~3 minutes. Neither wins outright,
+so it is a switch in Extra Options: `pixel` for the quality workflow,
+`latent` for the speed workflow. The per-tile plate decode for the
+drift probe is one latent block (5 frames) since r82 -- the probe is a
+readout and reads +-1px instead of +-0.2px, well under any alarm.

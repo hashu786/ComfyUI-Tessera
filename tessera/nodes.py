@@ -1922,6 +1922,7 @@ class TesseraRefine:
             vae=None, tile_cond=None, plan=None, args=None,
             frame_map="", clip=None):
 
+        _t_run0 = time.perf_counter()        # timing breakdown (r78)
         # widget renames -> internal names (the code keeps the old ones)
         tile_auto = spatial_tile
         if tile_auto == "off":           # legacy workflows
@@ -1941,6 +1942,7 @@ class TesseraRefine:
         seam_regen = seam_overlap
         ref_crop = video_ref_crop
         flat_skip = 0.0
+        composite = "pixel"
 
         if isinstance(args, dict):
             ref_crop = args.get("video_ref_crop", ref_crop)
@@ -1958,6 +1960,7 @@ class TesseraRefine:
             tile_select = args.get("tile_select", tile_select)
             tile_limit = args.get("tile_limit", tile_limit)
             flat_skip = args.get("flat_skip", 0.0)
+            composite = args.get("composite", "pixel")
             print(f"[TesseraRefine] args wired: "
                   f"{', '.join(f'{k}={v}' for k, v in sorted(args.items()))}")
 
@@ -2876,7 +2879,21 @@ class TesseraRefine:
                       f"between Streamed Encode and this one re-timed "
                       f"the clip. flat_skip disabled this run.")
             if _fs_ok:
-                _floor = max(float(_bl.median()), 1e-12)
+                # FLOOR CAP (r79): the floor is the clip's median block,
+                # which is the noise level only when flat blocks are the
+                # majority. On a busy-everywhere plate the median IS
+                # content (parade clip: 8.4e-3 vs 3.8e-5 coin / 2.9e-4
+                # greenscreen) and a merely-less-busy tile reads as
+                # "flat" -- measured: a quadrant of brick, awnings and
+                # bunting skipped at ratio 3.8. Capping the floor at an
+                # absolute 1e-3 keeps busy clips from over-skipping; a
+                # grainy-but-flat clip just refines (the safe direction).
+                _med0 = float(_bl.median())
+                _floor = max(min(_med0, 1e-3), 1e-12)
+                if _med0 > 1e-3:
+                    print(f"[TesseraRefine] flat_skip: busy plate -- median "
+                          f"block {_med0:.3e} capped to floor 1e-3 (skips "
+                          f"only truly empty tiles)")
                 _bh, _bw = int(_bl.shape[1]), int(_bl.shape[2])
                 _ratios = []                    # per tile: [chunk...]
                 for _t, _s, _c in selected:
@@ -3040,6 +3057,31 @@ class TesseraRefine:
         report_lines = []
         px_tiles = []
 
+        # ---- timing instrumentation (r78) -----------------------------
+        # Measure before optimizing: one breakdown line at the end of the
+        # run splits wall time into its real costs. The model load/swap
+        # estimate works per sampler call: the first step carries the
+        # load, so (first-step latency - median pure step) ~= load cost.
+        _tm = {"sample": 0.0, "text": 0.0, "first": [], "steps": []}
+
+        def _timed_sample(*_a, **_k):
+            _c0 = time.perf_counter()
+            _marks = []
+            _ocb = _k.get("callback")
+
+            def _cb(_s, _x0, _x, _tot):
+                _marks.append(time.perf_counter())
+                if _ocb is not None:
+                    _ocb(_s, _x0, _x, _tot)
+            _k["callback"] = _cb
+            _r = comfy.sample.sample_custom(*_a, **_k)
+            _tm["sample"] += time.perf_counter() - _c0
+            if _marks:
+                _tm["first"].append(_marks[0] - _c0)
+                _tm["steps"] += [_marks[_i] - _marks[_i - 1]
+                                 for _i in range(1, len(_marks))]
+            return _r
+
         jobs = [(ci, tc, k, sel) for ci, tc in enumerate(t_chunks)
                 for k, sel in enumerate(selected)
                 if (ci, sel[0]["index"]) not in flat_drop]
@@ -3061,6 +3103,7 @@ class TesseraRefine:
         refs0 = next((d.get("minimax_refs") for _, d in positive
                       if d.get("minimax_refs")), None)
         want_text = clip is not None and ref_crop == "per_tile" and bool(refs0)
+        _t_text0 = time.perf_counter()
         pixels = None
         if want_text:
             if vae is None:
@@ -3100,6 +3143,7 @@ class TesseraRefine:
             print("[TesseraRefine] clip wired but ref_crop=global or no "
                   "reference blocks -- per-tile text encode skipped")
         del pixels
+        _tm["text"] = time.perf_counter() - _t_text0
 
         # detail relay: chunk-local conditioning whose guide carries the
         # already-refined canvas for all frames before the chunk's generated
@@ -3108,7 +3152,56 @@ class TesseraRefine:
         positive_j, positive_clean_j = positive, positive_clean
         positive_hero_j, tile_cond_j = positive_hero, tile_cond
 
-        for j,(ci, (tp, tms, tme, twl), k, (t, score, c)) in enumerate(jobs):
+        _tm["loop0"] = time.perf_counter()
+
+        # ---- PHASE-BATCHED SAMPLING (r80) ------------------------------
+        # The tail split swaps main -> fine -> main around EVERY tile:
+        # measured 51s of 424s (12%) on a 4-tile 1080p run, ~6s a swap,
+        # linear in tile count. Within a chunk the tiles are independent
+        # (overlap mode: every window is anchored to its own conditioning
+        # and the canvas is only written when the chunk's last tile lands),
+        # so the order is free: run every tile's HEAD call with the main
+        # model loaded once, park the intermediates, then every TAIL call
+        # with the fine model loaded once. Two swaps per chunk instead of
+        # two per tile; same math, same seeds, same outputs. The prep
+        # (conditioning crops, masks, noise) is recomputed in the tail
+        # pass -- it is deterministic and cheap, and recomputing keeps the
+        # loop body in one piece. Hard-paste mode (seam_regen 0) writes
+        # the canvas tile by tile, so it keeps the sequential order.
+        # composite=latent (r84, Extra Options): the UNCHUNKED path
+        # composites the way chunked runs already do -- tiles accumulate
+        # in latent space (the overlap accumulator writes the canvas
+        # either way) and the finished canvas is decoded once. No
+        # per-tile decodes, no pixel compositor, no drift probe.
+        # Measured against pixel compositing on the same clip/seed/LoRA:
+        # -0.9% fine-band energy (uniform, not seam-localized), +1.7%
+        # temporal stability, seams equal; -7% time at 1080p, -10%+ at
+        # 4K. A quality/speed switch, not a correctness one.
+        _latent_comp = (composite == "latent")
+        if _latent_comp and pixel_out and not chunked:
+            print("[TesseraRefine] composite=latent: tiles pasted in latent "
+                  "space, one decode of the finished canvas (per-tile "
+                  "decodes and the drift probe are off)")
+        _batched = overlap_blend
+        if _batched:
+            _grps, _prev = [], None
+            for _j, _jb in enumerate(jobs):
+                if _jb[0] != _prev:
+                    _grps.append([])
+                    _prev = _jb[0]
+                _grps[-1].append(_j)
+            _sched = [(_j, _ph) for _g in _grps
+                      for _ph in ("head", "tail") for _j in _g]
+            if len(jobs) > 1:
+                print(f"[TesseraRefine] phase-batched sampling: head pass "
+                      f"then tail pass per chunk ({2 * len(_grps)} model "
+                      f"swaps instead of {2 * len(jobs)})")
+        else:
+            _sched = [(_j, "both") for _j in range(len(jobs))]
+        _pending = {}
+
+        for j, _phase in _sched:
+            ci, (tp, tms, tme, twl), k, (t, score, c) = jobs[j]
             comfy.model_management.throw_exception_if_processing_interrupted()
             t0 = time.perf_counter()
             i = t["index"]
@@ -3244,7 +3337,7 @@ class TesseraRefine:
             if outer is not None:
                 outer.set_postfix_str(f"{ck}tile {k + 1}/{n} {c}",
                                       refresh=False)
-            elif not disable_inner:
+            elif not disable_inner and _phase != "tail":
                 print(f"[TesseraRefine] {hdr}")
 
             lat_in = rewrap_latent(win_src, comp_win, wrapper)
@@ -3278,7 +3371,7 @@ class TesseraRefine:
             if grel_eff > 0.0:
                 pos_tail, _grel = _noise_minimax_keyframes(
                     pos, grel_eff, tile_seed, "full", "per_frame")
-                if _grel and j == 0:
+                if _grel and j == 0 and _phase != "tail":
                     print(f"[TesseraRefine] guide_release="
                           f"{grel_eff:.2f}: guide noised for the fine "
                           f"TAIL only (head keeps the clean guide -- "
@@ -3288,17 +3381,33 @@ class TesseraRefine:
                                            or sampler_fine is not None):
                 jcut = next(idx for idx in range(len(sig_t))
                             if float(sig_t[idx]) <= fine_below_sigma)
+            # phase bookkeeping: `_st` carries the head pass's result into
+            # the tail pass; `_credit` is the step count this pass earns
+            # on the progress bar; `_dt_head` the head pass's wall time.
+            _st = _pending.pop(j) if _phase == "tail" else None
+            _dt_head = _st["dt"] if _st else 0.0
+            _credit = steps
+            _split = (jcut is not None and 0 < jcut < len(sig_t) - 1)
             if jcut is not None and jcut == 0:
                 # whole schedule below the threshold: fine pair runs it all
-                out = comfy.sample.sample_custom(
+                out = _st["out"] if _st else _timed_sample(
                     m_fine, noise, cfg, s_fine, sig_t, pos_tail, negative,
                     lat_in, noise_mask=mask_in, callback=callback,
                     disable_pbar=disable_inner, seed=tile_seed)
-            elif jcut is not None and jcut < len(sig_t) - 1:
-                mid = comfy.sample.sample_custom(
+            elif _split:
+                mid = _st["mid"] if _st else _timed_sample(
                     m_head, noise, cfg, sampler, sig_t[:jcut + 1], pos,
                     negative, lat_in, noise_mask=mask_in, callback=callback,
                     disable_pbar=disable_inner, seed=tile_seed)
+                if _phase == "head":
+                    # park the intermediate; the tail pass picks it up
+                    # once the fine model is the loaded one
+                    _pending[j] = {"mid": mid,
+                                   "dt": time.perf_counter() - t0}
+                    state["done"] += jcut
+                    pbar.update_absolute(state["done"], total_steps, None)
+                    continue
+                _credit = steps - jcut if _st else steps
                 # The handoff math runs on plain tensors: unwrap (NestedTensor
                 # when audio companions ride along), compose per component,
                 # rewrap. Companions were denoised under null masks, so they
@@ -3334,20 +3443,29 @@ class TesseraRefine:
                           f"on fine pair"
                           f"{' [model_fine]' if model_fine is not None else ''}"
                           f"{' [sampler_fine]' if sampler_fine is not None else ''}")
-                out = comfy.sample.sample_custom(
+                out = _timed_sample(
                     m_fine, noise2, cfg, s_fine, sig_t[jcut:], pos_tail,
                     negative, lat2, noise_mask=mask_in, callback=callback,
                     disable_pbar=disable_inner, seed=tile_seed)
             else:
-                if jcut is not None and k == 0:
+                if jcut is not None and k == 0 and _phase != "tail":
                     print(f"[TesseraRefine] fine_below_sigma="
                           f"{fine_below_sigma} leaves no tail steps "
                           f"(schedule ends at {float(sig_t[-2]):.3f} before 0)"
                           f" -- running main pair only")
-                out = comfy.sample.sample_custom(
+                out = _st["out"] if _st else _timed_sample(
                     m_head, noise, cfg, sampler, sig_t, pos, negative, lat_in,
                     noise_mask=mask_in, callback=callback,
                     disable_pbar=disable_inner, seed=tile_seed)
+            if _phase == "head":
+                # single-call tile: fully sampled in the head pass; the
+                # tail pass only composites it (keeps the paste order)
+                _pending[j] = {"out": out, "dt": time.perf_counter() - t0}
+                state["done"] += steps
+                pbar.update_absolute(state["done"], total_steps, None)
+                continue
+            if _st is not None and "out" in _st:
+                _credit = 0
             out = split_latent(out)[0]
 
             # per-tile LATENT sharpness probe: high-frequency energy of the
@@ -3371,13 +3489,24 @@ class TesseraRefine:
             # decoding an INTERIOR chunk standalone glitches the causal
             # VAE's head frames. The final composite is a single decode
             # of the finished canvas instead.
-            if pixel_out and not chunked:
+            if pixel_out and not chunked and not _latent_comp:
                 win_px = _as_image(vae.decode(out))
-                plate_px = _as_image(vae.decode(win_plate))
                 my0p, my1p = t["my0"] * cell, t["my1"] * cell
                 mx0p, mx1p = t["mx0"] * cell, t["mx1"] * cell
-                sdx, sdy = _px_shift(win_px[:, my0p:my1p, mx0p:mx1p].cpu(),
-                                     plate_px[:, my0p:my1p, mx0p:mx1p].cpu())
+                # r82: the plate window is decoded ONLY to feed the drift
+                # probe (and the retired pixel color match) -- a spatial
+                # shift estimate does not need 124 frames. One latent
+                # block (5 px frames) is the same measurement at ~4% of
+                # the cost; the full decode stays for color match only.
+                if pixel_color_match != "off":
+                    plate_px = _as_image(vae.decode(win_plate))
+                    probe_n = win_px.shape[0]
+                else:
+                    plate_px = _as_image(vae.decode(win_plate[:, :, :2]))
+                    probe_n = min(plate_px.shape[0], win_px.shape[0])
+                sdx, sdy = _px_shift(
+                    win_px[:probe_n, my0p:my1p, mx0p:mx1p].cpu(),
+                    plate_px[:probe_n, my0p:my1p, mx0p:mx1p].cpu())
                 drift = f"  drift {sdx:+.1f},{sdy:+.1f}px"
                 if pixel_color_match != "off":
                     win_px = _px_color_match(win_px, plate_px,
@@ -3436,13 +3565,13 @@ class TesseraRefine:
                     else:
                         _paste(work, gen, t["x"] + rx0, t["y"] + ry0)
 
-            state["done"] += steps
+            state["done"] += _credit
             pbar.update_absolute(state["done"], total_steps, None)
 
-            dt = time.perf_counter() - t0
+            dt = time.perf_counter() - t0 + _dt_head
             step_times.append(dt / steps)
             per_step = sum(step_times) / len(step_times)
-            rem = sum(steps_for(jj[3][2]) for jj in jobs[j + 1:])
+            rem = max(0, total_steps - state["done"])
             eta = per_step * rem
             line = f"{hdr}{drift}  hf {hf_stat:.4f}  {_fmt(dt)}"
             report_lines.append(line)
@@ -3454,12 +3583,14 @@ class TesseraRefine:
 
         if outer is not None:
             outer.close()
+        _tm["loop"] = time.perf_counter() - _tm["loop0"]
         elapsed = time.perf_counter() - t_start
         summary = (f"{n} tile(s) refined ({n_hero} hero, {n - n_hero} base), "
                    f"{n_skip} skipped"
                    + (f", x{len(t_chunks)} temporal chunks" if chunked else "")
                    + f", in {_fmt(elapsed)}")
         print(f"[TesseraRefine] done — {summary}")
+        _tm["out0"] = time.perf_counter()
 
         if frame_match == "dc" and samples.ndim == 5:
             # GLOBAL per-frame anchor: one offset per (channel, frame) over
@@ -3505,7 +3636,7 @@ class TesseraRefine:
                         if (T_lat - 2) % 5 == 0 else T_lat * 4
                     est32 = px_T_est * (lh * cell) * (lw * cell) * 3 * 4
                 streamed = None
-                if est32 > (8 << 30) or (frame_map and samples.ndim == 5):
+                if est32 > (8 << 30):
                     print(f"[TesseraRefine] pixel_out: streamed segment decode "
                           f"(full canvas ~= {est32 / (1 << 30):.1f}GB float32)")
                     streamed = _decode_stream_video(vae, work, _as_image,
@@ -3519,6 +3650,28 @@ class TesseraRefine:
                     image_out = _as_image(vae.decode(work)).to(device="cpu")
                     if image_out.dtype != torch.float32:
                         image_out = image_out.float()
+                    # r83: a frame_map no longer forces the segment
+                    # decoder onto small canvases (its warm-ups cost ~65%
+                    # extra decode work); decimate the monolithic decode
+                    # the same way -- first occurrence of each source
+                    # frame -- so Temporal Decimate passes through.
+                    if frame_map and samples.ndim == 5:
+                        try:
+                            import json as _json
+                            _fm = [int(x) for x in _json.loads(frame_map)]
+                            if len(_fm) == int(image_out.shape[0]):
+                                _first = {}
+                                for _j, _fi in enumerate(_fm):
+                                    _first.setdefault(_fi, _j)
+                                _keep = sorted(_first.values())
+                                if len(_keep) < len(_fm):
+                                    image_out = image_out[_keep]
+                                    print(f"[TesseraRefine] frame_map wired: "
+                                          f"decimated {len(_fm)} -> "
+                                          f"{len(_keep)} frames after the "
+                                          f"decode")
+                        except Exception as _e:
+                            print(f"[TesseraRefine] frame_map ignored ({_e})")
             elif pixel_out:
                 print(f"[TesseraRefine] pixel_out: decoding plate + compositing "
                       f"{len(px_tiles)} refined tile(s) in pixel space "
@@ -3623,6 +3776,25 @@ class TesseraRefine:
                 _ph = 5 + 17 * ((T_lat - 2) // 5)
             image_out = torch.zeros(_ph, 16, 16, 3)
 
+        # ---- timing breakdown (r78): where the wall time went ---------
+        _t_end = time.perf_counter()
+        _sv = sorted(_tm["steps"])
+        _med = _sv[len(_sv) // 2] if _sv else 0.0
+        _load = sum(max(0.0, _f - _med) for _f in _tm["first"])
+        _ovh = max(0.0, _tm.get("loop", 0.0) - _tm["sample"])
+        _prep = max(0.0, (_tm.get("loop0", _t_end) - _t_run0)
+                    - _tm["text"])
+        _out = _t_end - _tm.get("out0", _t_end)
+        print(f"[TesseraRefine] timing: total {_fmt(_t_end - _t_run0)} = "
+              f"prep {_fmt(_prep)} + text-encode {_fmt(_tm['text'])} + "
+              f"sampling {_fmt(_tm['sample'])} (pure steps "
+              f"~{_fmt(max(0.0, _tm['sample'] - _load))}, model load/swap "
+              f"~{_fmt(_load)}) + tile overhead {_fmt(_ovh)} + "
+              f"output {_fmt(_out)}")
+        report_lines.append(
+            f"timing: total {_fmt(_t_end - _t_run0)}, sampling "
+            f"{_fmt(_tm['sample'])}, load/swap ~{_fmt(_load)}, "
+            f"output {_fmt(_out)}")
         return (out_latent, summary + "\n" + "\n".join(report_lines),
                 image_out)
 
@@ -4019,6 +4191,15 @@ class TesseraArgs:
             # floor; real content clears 4.0 by multiples. 0 = off.
             "flat_skip":       ("FLOAT", {"default": 4.0, "min": 0.0,
                                           "max": 64.0, "step": 0.1}),
+            # how the refined tiles become the output (unchunked runs;
+            # chunked runs always composite in latent space):
+            #   pixel  -- every tile decoded on its own and crossfaded in
+            #             pixel space. Measured: +0.9% fine-band energy.
+            #   latent -- tiles land in latent space, ONE decode of the
+            #             finished canvas. Measured: +1.7% temporal
+            #             stability, no per-tile decodes (-7% time at
+            #             1080p, -10%+ at 4K, growing with tile count).
+            "composite":       (["pixel", "latent"], {"default": "pixel"}),
         }}
 
     RETURN_TYPES = ("TESSERA_ARGS",)
@@ -4356,11 +4537,11 @@ class TesseraEncode:
     OOM regardless of GPU. This node replaces that chain for big
     targets: it takes the SOURCE clip (small; wire the Dilate output),
     upscales each temporal window to the target size, encodes it, keeps
-    the latents and drops the pixels. Windows start on the 17-px block
-    grid and every interior window re-encodes a 22-px warm-up (2 head
-    tokens + 1 block) that is DISCARDED -- the exact mirror of the
-    streamed segment decode's warm-up, so the stitched latent matches a
-    monolithic encode wherever the causal state has converged.
+    the latents and drops the pixels. Windows are disjoint on the 17-px
+    block grid (the stock H3 VAE encodes 17-frame clips independently,
+    so a block encodes identically in any window); each carries the
+    5-frame ladder tail, whose 2 tokens the next window re-derives
+    exactly. The stitch is bit-identical to a monolithic encode.
 
     Outputs replace the whole 4K pixel chain: `positive` carries the
     guide as the frame-0 keyframe (replaces MiniMax H3 AddGuide --
@@ -4405,15 +4586,24 @@ class TesseraEncode:
 
     @staticmethod
     def _windows(K, m):
-        """Window start blocks for K blocks, m blocks per window.
-        Returns (starts, m). Interior windows drop head+1st block
-        (22 px) and contribute blocks start+2..start+m; stride m-1."""
-        if K <= m:
-            return [0], max(1, K)
-        starts = list(range(0, K - m + 1, m - 1))
-        if starts[-1] != K - m:
-            starts.append(K - m)
-        return starts, m
+        """Window plan for K blocks, up to m blocks per window: returns
+        [(start_block, n_blocks)], disjoint on the 17-px block grid.
+
+        r81: the stock H3 VAE encodes a clip as INDEPENDENT 17-frame
+        clips (comfy/ldm/minimax/vae.py `encode_temporal`: each clip
+        through `_adaptive_encode` on its own, tokens concatenated, the
+        last 3 tokens dropped), causal only INSIDE a clip. So block g
+        encodes identically whether it is a window's first block or its
+        fifth, and the old 22-px warm-up (re-encode head + one block,
+        discard) bought nothing: 168 frames encoded to keep 124 on the
+        1080p baseline. Each window now encodes its blocks plus the
+        5-frame tail the ladder demands (17n+5 -- without it the
+        token_drop eats the last block's final 3 tokens); the tail's 2
+        tokens are the NEXT block's first two, exact by causality, and
+        the next window re-encodes only those 5 frames."""
+        m = max(1, min(m, K)) if K > 0 else 1
+        starts = list(range(0, max(K, 1), m))
+        return [(g, min(m, K - g)) for g in starts]
 
     def run(self, images, vae, positive, upscale_by, upscale_method,
             segment_frames, anchor=None, anchor_strength=1.0,
@@ -4434,16 +4624,17 @@ class TesseraEncode:
             _warn(f"[TesseraEncode] target {Wt}x{Ht} is not a "
                   f"multiple of 16 -- the VAE cell grid will pad; "
                   f"prefer an upscale_by landing on x16 dims")
-        starts, m = self._windows(K, max(2, (segment_frames - 5) // 17))
+        plan = self._windows(K, max(2, (segment_frames - 5) // 17))
+        m = max(n for _, n in plan)
         wpx = 17 * m + 5
         est = wpx * Ht * Wt * 3 * 4 / (1 << 30)
         whole = F * Ht * Wt * 3 * 4 / (1 << 30)
-        print(f"[TesseraEncode] streamed encode: {len(starts)} "
-              f"window(s) of {wpx} px frames at {Wt}x{Ht} (~{est:.1f}GB "
-              f"pixels per window; a whole-clip copy would be "
-              f"{whole:.1f}GB)")
+        _enc_px = sum(17 * n + 5 for _, n in plan)
+        print(f"[TesseraEncode] streamed encode: {len(plan)} "
+              f"window(s) of up to {wpx} px frames at {Wt}x{Ht} "
+              f"(~{est:.1f}GB pixels per window; a whole-clip copy would "
+              f"be {whole:.1f}GB); {_enc_px} frames encoded for {F} kept")
         T_abs = 2 + 5 * K
-        lows = [0 if g == 0 else 2 + 5 * (g + 1) for g in starts]
         # pixel-evidence stats (r77): fine-band energy per block,
         # measured on the SOURCE pixels -- the only sharp image in the
         # graph. The upscaled plate has no top-octave energy by
@@ -4467,9 +4658,20 @@ class TesseraEncode:
         flat_stats = torch.cat(_sp, dim=0)             # [F, bh, bw] cpu
         del _sp
         plate_parts, guide_parts = [], []
+        # TESSERA_VERIFY_ENCODE=1: also encode the whole clip through the
+        # stock path and print max|delta| against the stitch (one-off
+        # check of the r81 no-warm-up plan; needs the whole-clip copy in
+        # RAM, so only on clips that fit).
+        _verify = _os.environ.get("TESSERA_VERIFY_ENCODE", "") == "1"
+        _ver_full = None
+        if _verify:
+            _ver_full = comfy.utils.common_upscale(
+                images.movedim(-1, 1), Wt, Ht, upscale_method,
+                "disabled").movedim(1, -1)
+            _ver_full = vae.encode(_ver_full[:, :, :, :3]).cpu()
         t_start = time.time()
-        for i, g in enumerate(starts):
-            seg = images[17 * g:17 * g + wpx]
+        for i, (g, nb) in enumerate(plan):
+            seg = images[17 * g:17 * g + 17 * nb + 5]
             seg = comfy.utils.common_upscale(
                 seg.movedim(-1, 1), Wt, Ht, upscale_method,
                 "disabled").movedim(1, -1)
@@ -4483,19 +4685,18 @@ class TesseraEncode:
                 glat = vae.encode(spliced[:, :, :, :3])
                 del spliced
             del seg
-            abs_lo = lows[i]
-            abs_hi = (T_abs if i + 1 == len(starts)
-                      else min(2 + 5 * (g + m), lows[i + 1]))
-            w_lo, w_hi = abs_lo - 5 * g, abs_hi - 5 * g
-            plate_parts.append(lat[:, :, w_lo:w_hi].clone())
-            guide_parts.append(glat[:, :, w_lo:w_hi].clone())
+            # window tokens: [5g, 5g + 5nb + 2); the first 2 of an
+            # interior window duplicate the previous window's tail
+            w_lo = 0 if i == 0 else 2
+            plate_parts.append(lat[:, :, w_lo:].clone())
+            guide_parts.append(glat[:, :, w_lo:].clone())
             del lat
             if glat is not None:
                 del glat
             el = time.time() - t_start
-            eta = el / (i + 1) * (len(starts) - i - 1)
-            print(f"[TesseraEncode] window {i + 1}/{len(starts)} "
-                  f"(blocks {g}-{g + m}) encoded  ·  "
+            eta = el / (i + 1) * (len(plan) - i - 1)
+            print(f"[TesseraEncode] window {i + 1}/{len(plan)} "
+                  f"(blocks {g}-{g + nb - 1}) encoded  ·  "
                   f"eta {int(eta // 60)}m{int(eta % 60):02d}s")
         plate = torch.cat(plate_parts, dim=2)
         guide = torch.cat(guide_parts, dim=2)
@@ -4505,6 +4706,15 @@ class TesseraEncode:
                 f"[TesseraEncode] stitched {plate.shape[2]} latent "
                 f"tokens, expected {T_abs} -- window plan bug, please "
                 f"report")
+        if _ver_full is not None:
+            _d = (plate.cpu().float() - _ver_full.float()).abs()
+            _per = _d.amax(dim=(0, 1, 3, 4))
+            _bad = [int(_i) for _i in torch.nonzero(_per > 1e-5).flatten()]
+            print(f"[TesseraEncode] VERIFY: stitched vs whole-clip stock "
+                  f"encode max|delta| {float(_d.max()):.3e} (mean "
+                  f"{float(_d.mean()):.3e}); tokens over 1e-5: "
+                  f"{_bad if _bad else 'none'}")
+            del _ver_full, _d
         keyframes = list(positive[0][1].get("minimax_keyframes", []))
         keyframes.append({"resolved_frame_index": 0, "latent": guide})
         pos = node_helpers.conditioning_set_values(
@@ -4569,5 +4779,7 @@ if _SAMPLING_OK:
 NODE_CLASS_MAPPINGS["TesseraDecode"] = TesseraDecode
 NODE_DISPLAY_NAME_MAPPINGS["TesseraDecode"] = "Tessera Streamed Decode"
 
-print("[Tessera] loaded %d node(s): %s"
-      % (len(NODE_CLASS_MAPPINGS), ", ".join(sorted(NODE_CLASS_MAPPINGS))))
+TESSERA_REV = "r84"
+print("[Tessera] %s loaded %d node(s): %s"
+      % (TESSERA_REV, len(NODE_CLASS_MAPPINGS),
+         ", ".join(sorted(NODE_CLASS_MAPPINGS))))

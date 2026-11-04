@@ -1,7 +1,5 @@
 # Tessera
 
-https://github.com/user-attachments/assets/f27ced3c-fc75-4c98-8823-88c82a61410a
-
 Production video upscaling for ComfyUI, built on MiniMax H3. Load a
 clip, set a scale factor, press run: Tessera refines it tile-by-tile
 and chunk-by-chunk into clean 2K/4K/8K — on a single consumer GPU, at
@@ -58,6 +56,11 @@ Models (all local open weights):
 - First-frame anchor: feed a detailed still at 2x for real detail
   relay; at 4x and above leave the anchor unplugged and let the model
   render. When anchoring, set `motion_release_floor` to 0.3.
+- `composite` (Extra Options): `pixel` decodes every tile and
+  crossfades in pixel space (+0.9% fine detail); `latent` pastes in
+  latent space and decodes once (+1.7% temporal stability, ~7% faster
+  at 1080p, 10%+ at 4K). Quality workflow: pixel. Speed workflow:
+  latent. Chunked (long) runs always use latent.
 - If the final decode ever fails (disk full), the refined latent is
   saved as `tessera_rescue_*.latent` — LoadLatent → Tessera Streamed
   Decode recovers the render without resampling.

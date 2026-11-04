@@ -2,7 +2,7 @@
   "id": "e34a1d33-767f-4d50-b86c-c8b03559bc14",
   "revision": 0,
   "last_node_id": 454,
-  "last_link_id": 1154,
+  "last_link_id": 1155,
   "nodes": [
     {
       "id": 134,
@@ -1057,7 +1057,7 @@
       ],
       "size": [
         270,
-        150
+        174
       ],
       "flags": {},
       "order": 97,
@@ -1093,12 +1093,14 @@
         24,
         "auto",
         "sRGB",
+        "none",
         "none"
       ],
       "widgets_values_named": {
         "fps": 24,
         "bit_depth": "auto",
         "color_space": "sRGB",
+        "chroma_subsampling": "none",
         "codec": "none"
       }
     },
@@ -3228,7 +3230,7 @@
           "name": "MASK",
           "type": "MASK",
           "links": [
-            1130
+            1155
           ]
         }
       ],
@@ -4444,6 +4446,8 @@
         }
       ],
       "properties": {
+        "aux_id": "hashu786/ComfyUI-Tessera",
+        "ver": "930c882a17fb9a494308ac0f19ed3a73fa9a4ce0",
         "Node name for S&R": "TesseraDilate"
       },
       "widgets_values": [
@@ -4540,6 +4544,8 @@
         }
       ],
       "properties": {
+        "aux_id": "hashu786/ComfyUI-Tessera",
+        "ver": "930c882a17fb9a494308ac0f19ed3a73fa9a4ce0",
         "Node name for S&R": "TesseraEncode"
       },
       "widgets_values": [
@@ -4647,7 +4653,7 @@
           "name": "hero_mask",
           "shape": 7,
           "type": "MASK",
-          "link": 1130
+          "link": 1155
         },
         {
           "name": "tile_cond",
@@ -4704,6 +4710,8 @@
         }
       ],
       "properties": {
+        "aux_id": "hashu786/ComfyUI-Tessera",
+        "ver": "930c882a17fb9a494308ac0f19ed3a73fa9a4ce0",
         "Node name for S&R": "TesseraRefine"
       },
       "widgets_values": [
@@ -4794,6 +4802,8 @@
         }
       ],
       "properties": {
+        "aux_id": "hashu786/ComfyUI-Tessera",
+        "ver": "930c882a17fb9a494308ac0f19ed3a73fa9a4ce0",
         "Node name for S&R": "TesseraDecimate"
       },
       "widgets_values": [
@@ -4898,6 +4908,8 @@
         }
       ],
       "properties": {
+        "aux_id": "hashu786/ComfyUI-Tessera",
+        "ver": "930c882a17fb9a494308ac0f19ed3a73fa9a4ce0",
         "Node name for S&R": "TesseraPlan"
       },
       "widgets_values": [
@@ -4980,7 +4992,7 @@
       ],
       "size": [
         221.83203125,
-        322
+        346
       ],
       "flags": {},
       "order": 44,
@@ -4996,6 +5008,8 @@
         }
       ],
       "properties": {
+        "aux_id": "hashu786/ComfyUI-Tessera",
+        "ver": "930c882a17fb9a494308ac0f19ed3a73fa9a4ce0",
         "Node name for S&R": "TesseraArgs"
       },
       "widgets_values": [
@@ -5012,7 +5026,8 @@
         0.75,
         "",
         0,
-        4
+        4,
+        "pixel"
       ],
       "widgets_values_named": {
         "video_ref_crop": "per_tile",
@@ -5028,7 +5043,8 @@
         "fine_below_sigma": 0.75,
         "tile_select": "",
         "tile_limit": 0,
-        "flat_skip": 4
+        "flat_skip": 4,
+        "composite": "pixel"
       }
     }
   ],
@@ -5570,14 +5586,6 @@
       "SIGMAS"
     ],
     [
-      1130,
-      331,
-      0,
-      446,
-      12,
-      "MASK"
-    ],
-    [
       1132,
       333,
       0,
@@ -5704,30 +5712,6 @@
       446,
       15,
       "TESSERA_ARGS"
-    ],
-    [
-      1119,
-      445,
-      4,
-      240,
-      3,
-      "INT"
-    ],
-    [
-      1102,
-      434,
-      0,
-      429,
-      1,
-      "FLOAT"
-    ],
-    [
-      1133,
-      334,
-      0,
-      446,
-      17,
-      "STRING"
     ],
     [
       260,
@@ -5890,12 +5874,44 @@
       "INT"
     ],
     [
+      1119,
+      445,
+      4,
+      240,
+      3,
+      "INT"
+    ],
+    [
+      1102,
+      434,
+      0,
+      429,
+      1,
+      "FLOAT"
+    ],
+    [
+      1133,
+      334,
+      0,
+      446,
+      17,
+      "STRING"
+    ],
+    [
       1154,
       180,
       0,
       444,
       0,
       "IMAGE"
+    ],
+    [
+      1155,
+      331,
+      0,
+      446,
+      12,
+      "MASK"
     ]
   ],
   "groups": [
@@ -5927,13 +5943,13 @@
   "config": {},
   "extra": {
     "ds": {
-      "scale": 0.5730855330116817,
+      "scale": 0.573085533011682,
       "offset": [
-        4213.58999860526,
-        -4418.340739131059
+        3580.613103207133,
+        -4924.7316670816945
       ]
     },
-    "frontendVersion": "1.57.6",
+    "frontendVersion": "1.58.5",
     "VHS_latentpreview": true,
     "VHS_latentpreviewrate": 0,
     "VHS_MetadataImage": true,
